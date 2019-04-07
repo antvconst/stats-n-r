@@ -29,7 +29,7 @@ log.likelihood <- function(X, Pi, Components) {
   l
 }
 
-# For each observations compute components responsibilities
+# For each observation compute component responsibilities
 # under current estimates of weights, means and covariances
 component.responsibilities <- function(x, Pi, Components) {
   weighted.densities <- Pi * sapply(Components, density, x)
