@@ -1,0 +1,199 @@
+---
+title: "Интегрирование методом Монте-Карло"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Сходимость
+
+Рассматриваем интеграл
+$$
+\mathcal{I} = -\frac{2}{\sqrt{\pi}} \int_0^{+\infty} dx \int_{bx}^{+\infty} \frac{\sin t}{t} dt \int_{cx}^{+\infty} e^{-s^2} ds. 
+$$
+
+Вспомним известные специальные функции:
+$$
+\mathrm{Si}(x) = \int_0^x \frac{\sin t}{t} dt\ ,\\
+\mathrm{erf}(x) = \frac{2}{\sqrt{\pi}} \int_0^x e^{-t^2} dt\ .
+$$
+
+Через них наш интеграл выражается в виде
+$$
+  \mathcal{I} = \int_0^{+\infty} \bigg(\mathrm{Si}(bx) - \frac{\pi}{2}\bigg)\bigg(1 - \mathrm{erf}(cx) \bigg) dx.
+$$
+
+Пусть $b > 0$ и $c > 0$. Для множителей подинтегрального выражения известны асимптотики на бесконечности:
+$$
+  \mathrm{Si}(bx) - \frac{\pi}{2} \equiv \frac{\cos bx}{bx}\ ,\\
+  1-\mathrm{erf}(cx) \equiv \frac{e^{-c^2 x^2}}{\sqrt{\pi} cx}\ .
+$$
+Интеграл
+$$
+  \int_{\varepsilon}^{+\infty} \frac{e^{-c^2 x^2} \cos bx}{bc x^2} 
+$$
+мажорируется по модулю интегралом 
+$$
+  \frac{1}{bc} \int_{\varepsilon}^{+\infty} x^{-2} dx,
+$$
+который замечательным образом сходится. Следовательно, сходится и наш интеграл.
+
+## Интегрирование методом Монте-Карло
+
+Будем считать, что $b = c = 1$.
+
+Зададим наши функции. `f` - исходная функция, `f.transformed` - преобразованная заменами $x \mapsto \log u$, $t \mapsto \log v + \log u$, $s \mapsto \log w$, где $u, v, w \in [0, 1]$. `u` требуется для построения доверительного интервала для траектории.
+
+```{r}
+u <- function(t) {
+  0.1 + 3.15*sqrt(t)
+}
+
+f <- Vectorize(function(x, t, v) {
+  -2/sqrt(pi) * sin(t)/t * exp(-v^2)
+})
+
+f.transformed <- Vectorize(function(u, v, w) {
+  -2/sqrt(pi) * sin(log(v) + log(u)) * exp(-(log(w) + log(u))^2) / ((log(v) + log(u)) * u * v * w)
+})
+```
+
+### Функции для обработки выборки и отрисовки результатов
+
+```{r}
+library(glue)
+
+process.sample <- function(sample) {
+  n <- length(sample)
+  
+  sample.sd <- sd(sample)
+  print(glue("Sample sd: {sample.sd}"))
+  
+  t <- (1:n)/n
+  traj <- cumsum(sample)/(1:n)
+  
+  pointwise.moerr <- 1.65*sample.sd/sqrt(1:n)
+  traj.moerr <- sample.sd*sqrt(n)*u(t)/floor(n*t)
+  
+  traj.ci.low <- traj[n] - traj.moerr
+  traj.ci.high <- traj[n] + traj.moerr
+  pointwise.ci.low <- traj - pointwise.moerr
+  pointwise.ci.high <- traj + pointwise.moerr
+  return(data.frame(N = 1:n, 
+                    pointwise.ci.low = pointwise.ci.low, 
+                    pointwise.ci.high = pointwise.ci.high, 
+                    trajectory = traj,
+                    traj.ci.low = traj.ci.low,
+                    traj.ci.high = traj.ci.high))
+  
+}
+
+library(ggplot2)
+
+plot.results <- function(n, results, drop=5000, every=100) {
+  ggplot(results[seq(drop, n, every),], aes(x = N)) +
+    geom_line(aes(y = trajectory, color = "Trajectory")) +
+    geom_line(aes(y = pointwise.ci.low, color = "Pointwise CI")) +
+    geom_line(aes(y = pointwise.ci.high, color = "Pointwise CI")) + 
+    geom_line(aes(y = traj.ci.low, color = "Trajectory CI")) + 
+    geom_line(aes(y = traj.ci.high, color = "Trajectory CI")) +
+    geom_line(aes(y = -0.646145, color = "True value")) +
+    xlab("N") + ylab("Value") + labs(color = "Curve")
+}
+```
+
+Будем использовать равномерное распределение в $[0, 1]^3$, а также зависимые случайные величины $\xi = \alpha_1$, $\eta = \alpha_2 + \xi$, $\zeta = |\alpha_3| + \xi$, где $\alpha_1, \alpha_2 \equiv \mathrm{Exp}(1)$, а $\alpha_3 \equiv \mathrm{N}(0, 1/2)$. Совместное распределение этих случайных величин имеет плотность $p(u, v, w) = \frac{2}{2\sqrt{\pi}} e^{u-v-w^2}$.
+
+```{r}
+uniform.simulation <- function(f, n) {
+  u <- runif(n)
+  v <- runif(n)
+  w <- runif(n)
+  
+  sample <- f(u, v, w)
+  
+  return(sample)
+}
+
+p <- Vectorize(function(u, v, w) {
+  2/sqrt(pi) * exp(-v - (w-u)^2)
+})
+
+dependent.simulation <- function(f, n) {
+  u <- rexp(n)
+  v <- rexp(n) + u
+  w <- abs(rnorm(n, mean=0, sd=1/sqrt(2))) + u
+  
+  sample <- f(u, v, w) / p(u, v, w)
+  
+  return(sample)
+}
+
+```
+
+Построим оценки и графики для выборок из равномерного в $[0, 1]^3$ распределения.
+
+```{r}
+n <- 10^6
+res.uniform <- process.sample(uniform.simulation(f.transformed, n))
+
+plot.results(n, res.uniform, drop=5*10^5, every=10^4)
+
+print(res.uniform$trajectory[n])
+```
+
+Построим оценки и графики для выборок из "экспоненциально-нормального" распределения.
+
+```{r}
+n <- 10^6
+res.dependent <- process.sample(dependent.simulation(f, n))
+
+plot.results(n, res.dependent, drop=5*10^5, every=10^4)
+
+print(res.dependent$trajectory[n])
+```
+
+Сравним дисперсии для двух методов.
+
+```{r}
+N <- c(10^3, 10^4, 10^5, 10^6)
+deviation.uniform <- rep(0, length(N))
+deviation.dependent <- rep(0, length(N))
+
+for (k in 1:length(N)) {
+  deviation.uniform[k] <- var(replicate(100, mean(uniform.simulation(f.transformed, N[k]))))
+  deviation.dependent[k] <- var(replicate(100, mean(dependent.simulation(f, N[k]))))
+}
+
+deviation <- data.frame(N = N, deviation.dependent = deviation.dependent, deviation.uniform = deviation.uniform)
+
+
+ggplot(deviation, aes(x=N)) +
+  scale_x_continuous(trans='log10') +
+  geom_line(aes(y=deviation.dependent, color="Exponential + folded normal")) +
+  geom_line(aes(y=deviation.uniform, color="Uniform")) +
+  xlab('Sample size (log10 scale)') + ylab('Mean observed SD') + labs(color='Simulation method')
+```
+
+```{r}
+uniform.simulation.sd <- mean(replicate(100, sd(uniform.simulation(f.transformed, 10^6))))
+dependent.simulation.sd <- mean(replicate(100, sd(dependent.simulation(f, 10^6))))
+```
+
+```{r}
+library(ggplot2)
+
+Ns <- seq(1, 10^6, 1000)
+
+deviation <- data.frame(N = Ns,
+                        sd.dependent = dependent.simulation.sd / sqrt(Ns),
+                        sd.uniform = uniform.simulation.sd / sqrt(Ns))
+
+ggplot(deviation, aes(x=N)) +
+  scale_x_continuous(trans='log10') +
+  geom_line(aes(y=sd.dependent, color="Exponential + folded normal")) +
+  geom_line(aes(y=sd.uniform, color="Uniform")) +
+  xlab('Sample size (log10 scale)') + ylab('SD') + labs(color='Simulation method')
+```

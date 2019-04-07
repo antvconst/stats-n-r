@@ -1,0 +1,200 @@
+---
+title: "MLE"
+output: html_notebook
+---
+
+```{r}
+library(bbmle)
+library(optimx)
+library(car)
+```
+
+Определим константы.
+
+```{r}
+L = 3.
+N = 100000
+
+lambda = 1
+k = 1
+```
+
+Промоделируем выборку $Y$.
+
+```{r}
+rY <- function(n) {
+  Y.lower <- numeric(n)
+  Y.upper <- numeric(n)
+  
+  for (i in 1:n) {
+    # реализация X
+    r <- rweibull(n = 1, shape = k, scale = lambda)
+  
+    # теперь ищем для неё интервал
+    t <- 0
+  
+    while (t < L) {
+      t.new <- t + runif(n = 1, min = 0, max = 0.1)
+      if (t <= r && r < t.new) {
+        Y.lower[i] <- t
+        Y.upper[i] <- t.new
+        break
+      } else {
+        Y.lower[i] <- t.new
+        Y.upper[i] <- Inf
+      }
+      
+      t <- t.new
+    }
+  }
+  
+  list(lower=Y.lower, upper=Y.upper)
+}
+
+data <- rY(N)
+```
+
+Запишем (отрицательную) логарифмическую функцию правдоподобия.
+
+```{r}
+neg.LL <- function(lower, upper, k, lambda) {
+  F.u <- pweibull(upper, shape=k, scale=lambda)
+  F.l <- pweibull(lower, shape=k, scale=lambda)
+  
+  Q <- pmax(F.u - F.l, 1e-15)
+  
+  -sum(log(Q))
+}
+
+LL.fixed <- Vectorize(function(k, lambda) {
+  -neg.LL(data$lower, data$upper, k, lambda)
+})
+
+LL.grad <- function(lower, upper, k, lambda) {
+  X <- upper
+  Y <- lower
+  
+  exp.X <- exp(-(X/lambda)^k)
+  exp.Y <- exp(-(Y/lambda)^k)
+  
+  # k derivative
+  k.num.X <- log(X/lambda)*(X/lambda)^k*exp.X
+  k.num.Y <- log(Y/lambda)*(Y/lambda)^k*exp.Y
+  
+  k.num.X[is.na(k.num.X)] <- 0
+  k.num.Y[is.na(k.num.Y)] <- 0
+  
+  k.deriv <- -sum((k.num.X - k.num.Y)/(exp.Y - exp.X))
+  
+  # lambda derivative
+  l.num.X <- k*X*exp(-(X/lambda)^k)*(X/lambda)^(k-1) / lambda^2
+  l.num.Y <- k*Y*exp(-(Y/lambda)^k)*(Y/lambda)^(k-1) / lambda^2
+  
+  l.num.X[is.na(l.num.X)] <- 0
+  l.num.Y[is.na(l.num.Y)] <- 0
+  
+  l.deriv <- -sum((l.num.Y - l.num.X)/(exp.Y - exp.X))
+
+  
+  #print(paste("k = ", k, "lambda = ", lambda, "grad = ", k.deriv, " ", l.deriv))
+  
+  c(k.deriv, l.deriv)
+}
+```
+
+```{r}
+LL.grad(data$lower, data$upper, 1, 1)
+```
+
+Посмотрим, как ведёт себя логарифм правдоподобия в окрестности истинных значений параметров $k = 1$, $\lambda = 1$.
+
+```{r}
+x <- seq(0.8, 1.2, length = 20)
+y <- x
+z <- outer(x, y, LL.fixed)
+
+persp(x, y, z,
+  xlab = "k", ylab = "lambda", zlab = "Log-likelihood",
+  main = "Log-likelihood surface near optimum"
+)
+```
+
+
+Зафитим модель на данные при помощи mle2 для различного объёма выборки. Построим профили. Посчитаем ковариационные матрицы.
+
+```{r}
+Ns <- c(100, 1000, 10000, 100000)
+
+estimated.k <- numeric(length(Ns))
+estimated.lambda <- numeric(length(Ns))
+cov.matrices <- list(length(Ns))
+confints <- list(length(Ns))
+
+i <- 1
+for (n in Ns) {
+  fit <- 0
+  fit <- mle2(neg.LL,
+              optimizer = "optim",
+              method = "BFGS",
+              data = list(lower = data$lower[1:n],
+                          upper = data$upper[1:n]),
+              start = list(k = 0.7, lambda = 0.7),
+              gr = LL.grad)
+
+  p <- profile(fit)
+  plot(p, main=paste("N = ",  n))
+
+  cov.matrices[[i]] <- vcov(fit) 
+  estimated.k[i] <- summary(fit)@coef["k","Estimate"]
+  estimated.lambda[i] <- summary(fit)@coef["lambda","Estimate"]
+  confints[[i]] <- confint(fit)
+  i <- i + 1
+}
+```
+
+
+```{r}
+plot(0, 0, xlim=c(0.6,1.4), ylim=c(0.6,1.4), main="95% Confidence ellipses",
+    xlab="k", ylab="Lambda")
+
+for (i in 1:4) {
+  k_ <- estimated.k[i]
+  lambda_ <- estimated.lambda[i]
+  cov.matrix <- cov.matrices[[i]]
+  
+  ellipse(c(k_, lambda_), cov.matrix, 1.96, add=TRUE, xlab="", ylab="", 
+    col=palette()[i+1], lwd=2, fill=TRUE, fill.alpha=0.3, grid=TRUE)
+}
+
+legend(1.2, 0.9, legend=c("N = 100", "N = 1000", "N = 10000", "N = 100000"),
+       col=palette()[2:5], lty=1, cex=0.8,
+       title="Line types", text.font=4)
+```
+
+
+```{r}
+k.lower <- numeric(4)
+k.upper <- numeric(4)
+l.lower <- numeric(4)
+l.upper <- numeric(4)
+
+for (i in 1:4) {
+  k.lower[i] <- confints[[i]][1, 1]
+  k.upper[i] <- confints[[i]][1, 2]
+  l.lower[i] <- confints[[i]][2, 1]
+  l.upper[i] <- confints[[i]][2, 2]
+}
+
+```
+
+```{r}
+library(plotrix)
+
+plotCI(1:4, estimated.k, li=k.lower, ui=k.upper)
+lines(c(0, 5), c(1,1))
+```
+
+```{r}
+plotCI(1:4, estimated.lambda, li=l.lower, ui=l.upper)
+lines(c(0, 5), c(1,1))
+```

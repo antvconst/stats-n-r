@@ -1,0 +1,192 @@
+---
+title: "Simulation"
+output: html_notebook
+---
+
+
+```{r}
+library(ggplot2)
+library(SpatialExtremes)
+
+make.p <- function(xi) {
+  p <- function(x) {
+    ifelse(1+xi*x > 0, (1+xi*x)^(-1-1/xi) * exp(-(1+xi*x)^(-1/xi)), 0)
+  }
+  
+  return(p)
+}
+```
+
+```{r}
+# returns coeffs for line connecting subsequent points (x_i, y_i), (x_{i+1}, y_{i+1})
+connect.with.lines <- function(x, y) {
+  x.beg <- head(x, -1)
+  y.beg <- head(y, -1)
+  x.end <- x[-1]
+  y.end <- y[-1]
+  
+  a <- (y.end - y.beg)/(x.end - x.beg)
+  b <- y.beg - a*x.beg
+  
+  list("a" = a, "b" = b)
+}
+
+calculate.majorant <- function(x, y) {
+  coef <- connect.with.lines(x, y)
+  
+  a.left <- head(coef$a, -2)
+  b.left <- head(coef$b, -2)
+  a.right <- coef$a[-(1:2)]
+  b.right <- coef$b[-(1:2)]
+  
+  # intersection points
+  z <- (b.right - b.left)/(a.left - a.right)
+  z.y <- a.left*z + b.left
+  
+  # majorant multiline nodes (unsorted)
+  p.x <- c(z, x[c(-1, -length(x))])
+  sorting.perm <- order(p.x)
+  
+  # majorant multiline nodes (in right order)
+  p.x <- p.x[sorting.perm]
+  p.y <- c(z.y, y[c(-1, -length(x))])[sorting.perm]
+  
+  
+  multiline.coef <- connect.with.lines(p.x, p.y)
+  multiline.a <- multiline.coef$a
+  multiline.b <- multiline.coef$b
+  
+  a.left = coef$a[2]
+  b.left = coef$b[2]
+  a.right = rev(coef$a)[2]
+  b.right = rev(coef$b)[2]
+  
+  # final coeffs
+  a <- c(a.left, multiline.a, a.right)
+  b <- c(b.left, multiline.b, b.right)
+  
+  # majorant function and exponent
+  u <- function(x) {
+    i <- findInterval(x, p.x) + 1
+    a[i]*x + b[i]
+  }
+  exp.u <- function(t) exp(u(t))
+  
+  # weights of mixture
+  
+  z <- c(-Inf, p.x, +Inf)
+  z.left <- head(z, -1)
+  z.right <- z[-1]
+  
+  weights <- exp(b)/a*(exp(a*z.right) - exp(a*z.left))
+  
+  majorant <- list("a" = a,
+                   "b" = b,
+                   "x" = p.x,
+                   "z" = z,
+                   "u" = u,
+                   "exp.u" = exp.u,
+                   "weight" = weights,
+                   "o.x" = x,
+                   "o.y" = y)  
+  return(majorant)
+}
+
+```
+
+```{r}
+sample.from.majorant <- function(maj, n) {
+  tau <- sample(x=seq_along(maj$weight), size=n, prob=maj$weight, replace=TRUE)
+  
+  alpha <- runif(n, 0, 1)
+  
+  a <- maj$a[tau]
+  b <- maj$b[tau]
+  c <- maj$weight[tau]
+  z <- maj$z[tau]
+
+  eta <- log(alpha*a*c/exp(b) + exp(a*z))/a
+  
+  return(eta)
+}
+```
+
+```{r}
+update.majorant <- function(maj, x, y) {
+  n <- length(maj$o.x)
+  
+  if (n < 50) {
+    pos <- findInterval(x, maj$o.x)
+    pos <- pos[pos != 0 & pos != n]
+    
+    if (length(pos) != 0) {
+      new.x <- c(maj$o.x, x)
+      new.y <- c(maj$o.y, y)
+      
+      sorting_permutation <- order(new.x)
+      new.x <- new.x[sorting_permutation]
+      new.y <- new.y[sorting_permutation]
+        
+      maj <- calculate.majorant(new.x, new.y)
+    }
+  }
+  
+  maj
+}
+
+ars <- function(n, init.x, p, update=TRUE) {
+  init.y <- log(p(init.x))
+  maj <- calculate.majorant(init.x, init.y)
+  eta <- numeric(n)
+  
+  rejected <- 1:n
+  k <- n
+  
+  while (k > 0) {
+    s <- sample.from.majorant(maj, k)
+    eta[rejected] <- s
+    alpha <- runif(k)
+    
+    rejected <- rejected[alpha > p(s)/maj$exp.u(s)]
+    k <- length(rejected)
+    
+    maj <- update.majorant(maj, s[1], log(p(s[1])))
+  }
+  
+  eta
+}
+
+```
+
+```{r}
+p <- make.p(-1/2)
+x <- c(-10, -5, 0, 0.5, 0.99, 1-1e-5)
+y <- log(p(x))
+
+sample <- ars(1000000, x, p)
+
+#ggplot(data=data.frame(x=c(-10, 10)), aes(x)) +
+#  stat_function(fun=p, color='red') +
+#  geom_density(data=data.frame(x=sample), aes(x))
+```
+
+```{r}
+p.theoretical <- function(t) pgev(t, shape=-1/2)
+
+p.value.sample <- function(n, m) {
+  s <- numeric(n)
+  
+  for (i in 1:n) {
+    s[i] <- ks.test(ars(m, x, y), p.theoretical)$p
+  }
+  
+  s
+}
+
+p.sample <- p.value.sample(1000, 100)
+plot(ecdf(p.sample))
+```
+
+```{r}
+ks.test(p.sample, punif)
+```
